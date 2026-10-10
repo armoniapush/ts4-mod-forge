@@ -19,6 +19,9 @@
    - Only require `.package` when registering new XML Tuning instances (Pie Menu), STBL strings, or visual assets.
 
 ## Active Modules & Tools
-- `tools/compiler/compiler.py`: Compiler forcing Python 3.7.9 bytecode and strict package root layout.
+- `tools/compiler/compiler.py`: Compiler forcing Python 3.7.9 bytecode, strict package root layout, and auto-deploy to Mods folder.
 - `tools/templates/mycroftjr`: Cloned reference framework.
 - `.agents/skills/ts4-headless-engine/SKILL.md`: Project-specific architectural skill.
+
+## Deployment Target
+- **Game Mods Directory**: `C:\Users\armon\Documents\Electronic Arts\Los Sims 4\Mods`

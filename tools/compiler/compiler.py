@@ -112,11 +112,14 @@ def compile_mod(src_dir: str, mod_name: str, dist_dir: str, creator_name: str = 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compile TS4 pure script mod to .ts4script using Python 3.7.9 bytecode")
+    DEFAULT_MODS_DIR = r"C:\Users\armon\Documents\Electronic Arts\Los Sims 4\Mods"
     parser.add_argument("--src", required=True, help="Path to mod source directory")
     parser.add_argument("--name", required=True, help="Mod package name (will be the zip root folder)")
     parser.add_argument("--dist", default="dist", help="Output directory")
     parser.add_argument("--creator", default="Forge", help="Creator prefix")
-    parser.add_argument("--deploy", default=None, help="Optional direct path to TS4 Mods/ folder")
+    parser.add_argument("--deploy", default=DEFAULT_MODS_DIR, help="Direct path to TS4 Mods/ folder (default: user Mods folder)")
+    parser.add_argument("--no-deploy", action="store_true", help="Disable automatic deployment to Mods folder")
 
     args = parser.parse_args()
-    compile_mod(args.src, args.name, args.dist, args.creator, args.deploy)
+    deploy_target = None if args.no_deploy else args.deploy
+    compile_mod(args.src, args.name, args.dist, args.creator, deploy_target)
