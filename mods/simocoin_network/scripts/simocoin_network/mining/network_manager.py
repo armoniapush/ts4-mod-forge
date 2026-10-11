@@ -3,6 +3,7 @@ import alarms
 import clock
 import services
 from interactions.base.interaction import Interaction
+from interactions.interaction_queue import InteractionQueue
 from simocoin_network.core.injector import inject
 from simocoin_network.mining.config import (
     SIMOCOIN_ENTRY_COST,
@@ -92,7 +93,6 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
     _IS_REPLICATING = True
     try:
         obj_manager = services.object_manager()
-        sim_info_manager = services.sim_info_manager()
         if obj_manager is None:
             return
 
@@ -105,7 +105,7 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
         if household is None or not hasattr(household, 'funds'):
             return
 
-        _log_debug('[_execute_replicate_mining delayed execution] PC: ' + str(primary_computer))
+        _log_debug('[_execute_replicate_mining] Starting replication. Master PC: ' + str(primary_computer_id) + ', Sim: ' + str(sim))
         mining_state_value = extract_mining_state_value(primary_computer, interaction_ref)
         _log_debug('Resolved mining_state_value: ' + str(mining_state_value))
         
@@ -114,27 +114,31 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
         _log_debug('Resolved farming_stat: ' + str(farming_stat))
 
         funds = household.funds
+        activated_count = 0
 
         for slave_pc in get_target_mining_computers_gen(primary_computer.id, sim):
-            _log_debug('Evaluating slave PC: ' + str(slave_pc))
+            _log_debug('Evaluating slave PC ID: ' + str(slave_pc.id))
             if mining_state_value is not None:
                 if slave_pc.get_state(mining_state_value.state) == mining_state_value:
-                    _log_debug('Slave PC already in state: ' + str(slave_pc))
+                    _log_debug('Slave PC already in state: ' + str(slave_pc.id))
                     continue
 
             if hasattr(funds, 'try_remove'):
                 if not funds.try_remove(SIMOCOIN_ENTRY_COST, TELEMETRY_MONEY_REASON, sim):
-                    _log_debug('try_remove returned False. Stopping replication.')
+                    _log_debug('try_remove failed (insufficient funds). Aborting remaining.')
                     break
             else:
                 if funds.money < SIMOCOIN_ENTRY_COST:
-                    _log_debug('Not enough funds. Stopping replication.')
+                    _log_debug('Insufficient funds. Aborting remaining.')
                     break
                 funds.remove(SIMOCOIN_ENTRY_COST, TELEMETRY_MONEY_REASON)
 
             if mining_state_value is not None:
-                slave_pc.set_state(mining_state_value.state, mining_state_value)
-                _log_debug('set_state applied to slave PC: ' + str(slave_pc))
+                try:
+                    slave_pc.set_state(mining_state_value.state, mining_state_value, immediate=True, force_update=True)
+                except TypeError:
+                    slave_pc.set_state(mining_state_value.state, mining_state_value)
+                _log_debug('set_state applied to slave PC ID: ' + str(slave_pc.id))
 
             if farming_stat is not None:
                 slave_stat_comp = getattr(slave_pc, 'statistic_component', None)
@@ -144,12 +148,16 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
                         stat_inst = tracker.add_statistic(farming_stat)
                         if stat_inst is not None:
                             stat_inst.set_value(stat_inst.max_value)
-                            _log_debug('Set commodity tracker stat value on slave PC')
+                            _log_debug('Set commodity tracker max value on slave PC ID: ' + str(slave_pc.id))
 
             slave_farming_comp = get_simocoin_farming_component(slave_pc)
             if slave_farming_comp is not None and hasattr(slave_farming_comp, '_refresh'):
                 slave_farming_comp._refresh()
-                _log_debug('_refresh called on slave farming component')
+                _log_debug('_refresh called on slave farming component ID: ' + str(slave_pc.id))
+
+            activated_count += 1
+
+        _log_debug('<<< Replication complete. Total slave computers activated: ' + str(activated_count))
 
     except Exception as e:
         _log_debug('Exception in _execute_replicate_mining: ' + str(e))
@@ -157,8 +165,8 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
         _IS_REPLICATING = False
 
 def schedule_delayed_replication(primary_interaction):
-    primary_computer = primary_interaction.target
-    sim = primary_interaction.sim
+    primary_computer = getattr(primary_interaction, 'target', None)
+    sim = getattr(primary_interaction, 'sim', None)
     if primary_computer is None or sim is None:
         return
 
@@ -170,28 +178,46 @@ def schedule_delayed_replication(primary_interaction):
 
     time_delay = clock.interval_in_sim_seconds(1)
     alarms.add_alarm(primary_interaction, time_delay, _alarm_callback)
-    _log_debug('Delayed replication alarm scheduled (1 sim second) to ensure stable posture state.')
+    _log_debug('Alarm scheduled for delayed replication (1 sim sec) on PC ID: ' + str(primary_computer_id))
+
+def _process_potential_mining_interaction(interaction):
+    if interaction is None:
+        return
+    if not getattr(interaction, 'is_super', False):
+        return
+
+    target = getattr(interaction, 'target', None)
+    if target is None or not getattr(target, 'is_computer', False):
+        return
+
+    try:
+        aff = getattr(interaction, 'affordance', None)
+        aff_name = getattr(aff, '__name__', '')
+        _log_debug('Intercepted computer SuperInteraction: ' + str(aff_name) + ', target ID: ' + str(getattr(target, 'id', None)))
+        if is_simocoin_mining_context(target, aff):
+            _log_debug('>>> Matched Simocoin context! Scheduling delayed batch replication...')
+            schedule_delayed_replication(interaction)
+    except Exception as e:
+        _log_debug('Error in _process_potential_mining_interaction: ' + str(e))
+
+@inject(InteractionQueue, 'run_interaction_gen')
+def _hook_on_interaction_queue_run(original, self, *args, **kwargs):
+    result = original(self, *args, **kwargs)
+    try:
+        if result and len(args) > 1:
+            interaction = args[1]
+            _process_potential_mining_interaction(interaction)
+    except Exception as e:
+        _log_debug('Error in InteractionQueue hook: ' + str(e))
+    return result
 
 @inject(Interaction, 'on_run')
 def _hook_on_interaction_run(original, self, *args, **kwargs):
     result = original(self, *args, **kwargs)
     if result is False:
         return result
-
-    if not getattr(self, 'is_super', False):
-        return result
-
-    target = getattr(self, 'target', None)
-    if target is None or not getattr(target, 'is_computer', False):
-        return result
-
     try:
-        aff_name = getattr(self.affordance, '__name__', '')
-        _log_debug('Computer SuperInteraction on_run: affordance=' + str(aff_name) + ', target=' + str(target))
-        if is_simocoin_mining_context(target, self.affordance):
-            _log_debug('Matched Simocoin context! Scheduling delayed replication...')
-            schedule_delayed_replication(self)
+        _process_potential_mining_interaction(self)
     except Exception as e:
-        _log_debug('Error in hook: ' + str(e))
-
+        _log_debug('Error in Interaction.on_run fallback hook: ' + str(e))
     return result
