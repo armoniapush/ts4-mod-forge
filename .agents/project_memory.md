@@ -22,6 +22,10 @@
 - `tools/compiler/compiler.py`: Compiler forcing Python 3.7.9 bytecode, strict package root layout, and auto-deploy to Mods folder.
 - `tools/templates/mycroftjr`: Cloned reference framework.
 - `.agents/skills/ts4-headless-engine/SKILL.md`: Project-specific architectural skill.
+- `mods/simocoin_network`: Headless automated Simocoin rig replicator mod (`dist/HashStratum_RigManager_simocoin_network.ts4script`).
+  - Fast-Path Interaction hook (`is_super`, `target.is_computer`).
+  - Native Maxis security locking hierarchy & hardware sanitization.
+  - Reentrancy locking (`_IS_REPLICATING`) and atomic `try_remove` financial deduction.
 
 ## Deployment Target
 - **Game Mods Directory**: `C:\Users\armon\Documents\Electronic Arts\Los Sims 4\Mods`
