@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
+import alarms
+import clock
 import services
-import sims4.log
 from interactions.base.interaction import Interaction
 from simocoin_network.core.injector import inject
 from simocoin_network.mining.config import (
@@ -83,25 +84,29 @@ def extract_mining_state_value(primary_computer, interaction):
 
     return None
 
-def replicate_mining_network(primary_interaction):
+def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
     global _IS_REPLICATING
     if _IS_REPLICATING:
         return
 
-    primary_computer = primary_interaction.target
-    sim = primary_interaction.sim
-
-    if primary_computer is None or sim is None:
-        return
-
-    household = getattr(sim, 'household', None)
-    if household is None or not hasattr(household, 'funds'):
-        return
-
     _IS_REPLICATING = True
     try:
-        _log_debug('replicate_mining_network starting on primary PC: ' + str(primary_computer))
-        mining_state_value = extract_mining_state_value(primary_computer, primary_interaction)
+        obj_manager = services.object_manager()
+        sim_info_manager = services.sim_info_manager()
+        if obj_manager is None:
+            return
+
+        primary_computer = obj_manager.get(primary_computer_id)
+        sim = obj_manager.get(sim_id)
+        if primary_computer is None or sim is None:
+            return
+
+        household = getattr(sim, 'household', None)
+        if household is None or not hasattr(household, 'funds'):
+            return
+
+        _log_debug('[_execute_replicate_mining delayed execution] PC: ' + str(primary_computer))
+        mining_state_value = extract_mining_state_value(primary_computer, interaction_ref)
         _log_debug('Resolved mining_state_value: ' + str(mining_state_value))
         
         comp = get_simocoin_farming_component(primary_computer)
@@ -147,9 +152,25 @@ def replicate_mining_network(primary_interaction):
                 _log_debug('_refresh called on slave farming component')
 
     except Exception as e:
-        _log_debug('Exception in replicate_mining_network: ' + str(e))
+        _log_debug('Exception in _execute_replicate_mining: ' + str(e))
     finally:
         _IS_REPLICATING = False
+
+def schedule_delayed_replication(primary_interaction):
+    primary_computer = primary_interaction.target
+    sim = primary_interaction.sim
+    if primary_computer is None or sim is None:
+        return
+
+    primary_computer_id = primary_computer.id
+    sim_id = sim.id
+
+    def _alarm_callback(timeline):
+        _execute_replicate_mining(primary_computer_id, sim_id, primary_interaction)
+
+    time_delay = clock.interval_in_sim_seconds(1)
+    alarms.add_alarm(primary_interaction, time_delay, _alarm_callback)
+    _log_debug('Delayed replication alarm scheduled (1 sim second) to ensure stable posture state.')
 
 @inject(Interaction, 'on_run')
 def _hook_on_interaction_run(original, self, *args, **kwargs):
@@ -168,8 +189,8 @@ def _hook_on_interaction_run(original, self, *args, **kwargs):
         aff_name = getattr(self.affordance, '__name__', '')
         _log_debug('Computer SuperInteraction on_run: affordance=' + str(aff_name) + ', target=' + str(target))
         if is_simocoin_mining_context(target, self.affordance):
-            _log_debug('Matched Simocoin context! Triggering replication...')
-            replicate_mining_network(self)
+            _log_debug('Matched Simocoin context! Scheduling delayed replication...')
+            schedule_delayed_replication(self)
     except Exception as e:
         _log_debug('Error in hook: ' + str(e))
 
