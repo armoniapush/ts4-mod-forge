@@ -105,7 +105,7 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
         if household is None or not hasattr(household, 'funds'):
             return
 
-        _log_debug('[_execute_replicate_mining] Starting replication. Master PC: ' + str(primary_computer_id) + ', Sim: ' + str(sim))
+        _log_debug('[_execute_replicate_mining] Starting replication. Master PC ID: ' + str(primary_computer_id))
         mining_state_value = extract_mining_state_value(primary_computer, interaction_ref)
         _log_debug('Resolved mining_state_value: ' + str(mining_state_value))
         
@@ -183,33 +183,39 @@ def schedule_delayed_replication(primary_interaction):
 def _process_potential_mining_interaction(interaction):
     if interaction is None:
         return
-    if not getattr(interaction, 'is_super', False):
-        return
 
+    aff = getattr(interaction, 'affordance', None)
+    aff_name = getattr(aff, '__name__', '')
     target = getattr(interaction, 'target', None)
-    if target is None or not getattr(target, 'is_computer', False):
-        return
+    target_name = getattr(target, '__class__', {}).__name__ if target else 'None'
+    target_id = getattr(target, 'id', 'None')
 
-    try:
-        aff = getattr(interaction, 'affordance', None)
-        aff_name = getattr(aff, '__name__', '')
-        _log_debug('Intercepted computer SuperInteraction: ' + str(aff_name) + ', target ID: ' + str(getattr(target, 'id', None)))
-        if is_simocoin_mining_context(target, aff):
-            _log_debug('>>> Matched Simocoin context! Scheduling delayed batch replication...')
-            schedule_delayed_replication(interaction)
-    except Exception as e:
-        _log_debug('Error in _process_potential_mining_interaction: ' + str(e))
+    # Registro de todas las interacciones que toquen cualquier computadora
+    is_computer = bool(target and getattr(target, 'is_computer', False))
+    if is_computer:
+        _log_debug('Computer Interaction: aff=' + str(aff_name) + ' target=' + str(target_name) + ' ID=' + str(target_id))
+
+    if is_simocoin_mining_context(target, aff):
+        _log_debug('>>> MATCHED Simocoin context on ' + str(aff_name) + '! Scheduling delayed batch replication...')
+        schedule_delayed_replication(interaction)
 
 @inject(InteractionQueue, 'run_interaction_gen')
 def _hook_on_interaction_queue_run(original, self, *args, **kwargs):
-    result = original(self, *args, **kwargs)
     try:
-        if result and len(args) > 1:
+        # En run_interaction_gen: args = (timeline, interaction, ...)
+        if len(args) > 1:
             interaction = args[1]
+        elif len(args) > 0 and hasattr(args[0], 'is_super'):
+            interaction = args[0]
+        else:
+            interaction = kwargs.get('interaction', None)
+        
+        if interaction is not None:
             _process_potential_mining_interaction(interaction)
     except Exception as e:
         _log_debug('Error in InteractionQueue hook: ' + str(e))
-    return result
+
+    return original(self, *args, **kwargs)
 
 @inject(Interaction, 'on_run')
 def _hook_on_interaction_run(original, self, *args, **kwargs):
