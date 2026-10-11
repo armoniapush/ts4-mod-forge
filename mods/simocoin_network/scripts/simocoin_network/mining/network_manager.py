@@ -118,8 +118,16 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
 
         for slave_pc in get_target_mining_computers_gen(primary_computer.id, sim):
             _log_debug('Evaluating slave PC ID: ' + str(slave_pc.id))
+            slave_state_comp = getattr(slave_pc, 'state_component', None)
+
             if mining_state_value is not None:
-                if slave_pc.get_state(mining_state_value.state) == mining_state_value:
+                current_val = None
+                if slave_state_comp is not None:
+                    current_val = slave_state_comp.get_state(mining_state_value.state)
+                elif hasattr(slave_pc, 'get_state'):
+                    current_val = slave_pc.get_state(mining_state_value.state)
+
+                if current_val == mining_state_value:
                     _log_debug('Slave PC already in state: ' + str(slave_pc.id))
                     continue
 
@@ -134,10 +142,13 @@ def _execute_replicate_mining(primary_computer_id, sim_id, interaction_ref):
                 funds.remove(SIMOCOIN_ENTRY_COST, TELEMETRY_MONEY_REASON)
 
             if mining_state_value is not None:
-                try:
-                    slave_pc.set_state(mining_state_value.state, mining_state_value, immediate=True, force_update=True)
-                except TypeError:
-                    slave_pc.set_state(mining_state_value.state, mining_state_value)
+                if slave_state_comp is not None:
+                    slave_state_comp.set_state(mining_state_value.state, mining_state_value, immediate=True, force_update=True)
+                elif hasattr(slave_pc, 'set_state'):
+                    try:
+                        slave_pc.set_state(mining_state_value.state, mining_state_value, immediate=True, force_update=True)
+                    except TypeError:
+                        slave_pc.set_state(mining_state_value.state, mining_state_value)
                 _log_debug('set_state applied to slave PC ID: ' + str(slave_pc.id))
 
             if farming_stat is not None:
@@ -190,7 +201,6 @@ def _process_potential_mining_interaction(interaction):
     target_name = getattr(target, '__class__', {}).__name__ if target else 'None'
     target_id = getattr(target, 'id', 'None')
 
-    # Registro de todas las interacciones que toquen cualquier computadora
     is_computer = bool(target and getattr(target, 'is_computer', False))
     if is_computer:
         _log_debug('Computer Interaction: aff=' + str(aff_name) + ' target=' + str(target_name) + ' ID=' + str(target_id))
@@ -199,31 +209,29 @@ def _process_potential_mining_interaction(interaction):
         _log_debug('>>> MATCHED Simocoin context on ' + str(aff_name) + '! Scheduling delayed batch replication...')
         schedule_delayed_replication(interaction)
 
-@inject(InteractionQueue, 'run_interaction_gen')
-def _hook_on_interaction_queue_run(original, self, *args, **kwargs):
+@inject(InteractionQueue, 'append')
+def _hook_on_interaction_queue_append(original, self, interaction, *args, **kwargs):
+    result = original(self, interaction, *args, **kwargs)
     try:
-        # En run_interaction_gen: args = (timeline, interaction, ...)
-        if len(args) > 1:
-            interaction = args[1]
-        elif len(args) > 0 and hasattr(args[0], 'is_super'):
-            interaction = args[0]
-        else:
-            interaction = kwargs.get('interaction', None)
-        
-        if interaction is not None:
-            _process_potential_mining_interaction(interaction)
+        _process_potential_mining_interaction(interaction)
     except Exception as e:
-        _log_debug('Error in InteractionQueue hook: ' + str(e))
+        _log_debug('Error in InteractionQueue.append hook: ' + str(e))
+    return result
 
-    return original(self, *args, **kwargs)
-
-@inject(Interaction, 'on_run')
-def _hook_on_interaction_run(original, self, *args, **kwargs):
+@inject(Interaction, '_trigger_interaction_start_event')
+def _hook_on_trigger_interaction_start_event(original, self, *args, **kwargs):
     result = original(self, *args, **kwargs)
-    if result is False:
-        return result
     try:
         _process_potential_mining_interaction(self)
     except Exception as e:
-        _log_debug('Error in Interaction.on_run fallback hook: ' + str(e))
+        _log_debug('Error in Interaction._trigger_interaction_start_event hook: ' + str(e))
+    return result
+
+@inject(Interaction, '_pre_perform')
+def _hook_on_pre_perform(original, self, *args, **kwargs):
+    result = original(self, *args, **kwargs)
+    try:
+        _process_potential_mining_interaction(self)
+    except Exception as e:
+        _log_debug('Error in Interaction._pre_perform hook: ' + str(e))
     return result
