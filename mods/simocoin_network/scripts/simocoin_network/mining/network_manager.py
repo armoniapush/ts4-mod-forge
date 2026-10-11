@@ -1,44 +1,65 @@
 # -*- coding: utf-8 -*-
 import services
+import sims4.log
 from interactions.base.interaction import Interaction
 from simocoin_network.core.injector import inject
 from simocoin_network.mining.config import (
     SIMOCOIN_ENTRY_COST,
-    MINING_AFFORDANCE_KEYWORDS,
     TELEMETRY_MONEY_REASON
 )
 from simocoin_network.mining.lot_scanner import get_target_mining_computers_gen
 
-# Cerrojo de reentrancia atómico
-_IS_REPLICATING = False
+try:
+    from objects.components.types import SIMOCOIN_FARMING_COMPONENT
+except ImportError:
+    SIMOCOIN_FARMING_COMPONENT = None
 
-# Caché memoizada del ObjectStateValue de minado para latencia O(1) tras el primer arranque
+def _log_debug(msg):
+    try:
+        with open('C:\\Users\\armon\\Documents\\Electronic Arts\\Los Sims 4\\hashstratum_debug.log', 'a', encoding='utf-8') as lf:
+            lf.write(str(msg) + '\n')
+    except Exception:
+        pass
+
+_IS_REPLICATING = False
 _CACHED_MINING_STATE_VALUE = None
 
-def is_simocoin_mining_affordance(affordance):
-    """
-    Comprueba si una affordance corresponde a la interacción de minar Simocoin.
-    """
-    if affordance is None:
-        return False
-    aff_name = getattr(affordance, '__name__', '').lower()
-    for kw in MINING_AFFORDANCE_KEYWORDS:
-        if kw not in aff_name:
-            return False
-    return True
+def get_simocoin_farming_component(obj):
+    if SIMOCOIN_FARMING_COMPONENT is not None and hasattr(obj, 'get_component'):
+        comp = obj.get_component(SIMOCOIN_FARMING_COMPONENT)
+        if comp is not None:
+            return comp
+    if hasattr(obj, 'simocoin_farming_component'):
+        return obj.simocoin_farming_component
+    return None
+
+def is_simocoin_mining_context(primary_computer, affordance):
+    if affordance is not None:
+        aff_name = getattr(affordance, '__name__', '').lower()
+        class_name = getattr(affordance, '__class__', {}).__name__.lower() if hasattr(affordance, '__class__') else ''
+        for kw in ('simocoin', 'mine', 'crypto', 'farming'):
+            if kw in aff_name or kw in class_name:
+                return True
+
+    comp = get_simocoin_farming_component(primary_computer)
+    if comp is not None:
+        return True
+
+    return False
 
 def extract_mining_state_value(primary_computer, interaction):
-    """
-    Resuelve deterministamente el ObjectStateValue de minería con memoización O(1).
-    Estrategia 1: Caché de sesiones previas en memoria.
-    Estrategia 2: Inspección estática de basic_extras en la affordance (latencia 0).
-    Estrategia 3: Inspección dinámica de los estados activos del ordenador primario.
-    """
     global _CACHED_MINING_STATE_VALUE
     if _CACHED_MINING_STATE_VALUE is not None:
         return _CACHED_MINING_STATE_VALUE
 
-    # Estrategia 2: basic_extras de la definición de affordance
+    comp = get_simocoin_farming_component(primary_computer)
+    if comp is not None:
+        sv = getattr(comp, 'farming_state_value', None)
+        if sv is not None:
+            _CACHED_MINING_STATE_VALUE = sv
+            _log_debug('Found farming_state_value via SimoCoinFarmingComponent: ' + str(sv))
+            return sv
+
     affordance = getattr(interaction, 'affordance', None)
     if affordance is not None and hasattr(affordance, 'basic_extras'):
         for extra in affordance.basic_extras:
@@ -46,25 +67,23 @@ def extract_mining_state_value(primary_computer, interaction):
             if state_values:
                 for sv in state_values:
                     sv_str = str(sv).lower()
-                    if 'mine' in sv_str or 'simocoin' in sv_str or 'crypto' in sv_str:
+                    if 'mine' in sv_str or 'simocoin' in sv_str or 'crypto' in sv_str or 'farm' in sv_str:
                         _CACHED_MINING_STATE_VALUE = sv
+                        _log_debug('Found state value via basic_extras: ' + str(sv))
                         return sv
 
-    # Estrategia 3: state_component del ordenador primario
     state_comp = getattr(primary_computer, 'state_component', None)
     if state_comp is not None and hasattr(state_comp, '_states'):
         for state_def, state_val in state_comp._states.items():
             val_str = str(state_val).lower()
-            if 'simocoin' in val_str or 'mining' in val_str:
+            if 'simocoin' in val_str or 'mining' in val_str or 'farm' in val_str:
                 _CACHED_MINING_STATE_VALUE = state_val
+                _log_debug('Found state value via state_comp._states: ' + str(state_val))
                 return state_val
 
     return None
 
 def replicate_mining_network(primary_interaction):
-    """
-    Orquesta la propagación remota del proceso de minería a las computadoras esclavas.
-    """
     global _IS_REPLICATING
     if _IS_REPLICATING:
         return
@@ -81,57 +100,77 @@ def replicate_mining_network(primary_interaction):
 
     _IS_REPLICATING = True
     try:
+        _log_debug('replicate_mining_network starting on primary PC: ' + str(primary_computer))
         mining_state_value = extract_mining_state_value(primary_computer, primary_interaction)
-        if mining_state_value is None:
-            return
+        _log_debug('Resolved mining_state_value: ' + str(mining_state_value))
+        
+        comp = get_simocoin_farming_component(primary_computer)
+        farming_stat = getattr(comp, 'farming_stat', None) if comp is not None else None
+        _log_debug('Resolved farming_stat: ' + str(farming_stat))
 
         funds = household.funds
 
         for slave_pc in get_target_mining_computers_gen(primary_computer.id, sim):
-            # Evitar encender una computadora que ya esté minando
-            if slave_pc.get_state(mining_state_value.state) == mining_state_value:
-                continue
+            _log_debug('Evaluating slave PC: ' + str(slave_pc))
+            if mining_state_value is not None:
+                if slave_pc.get_state(mining_state_value.state) == mining_state_value:
+                    _log_debug('Slave PC already in state: ' + str(slave_pc))
+                    continue
 
-            # Transacción atómica compatible con SNB Bank / FundsTracker
             if hasattr(funds, 'try_remove'):
                 if not funds.try_remove(SIMOCOIN_ENTRY_COST, TELEMETRY_MONEY_REASON, sim):
+                    _log_debug('try_remove returned False. Stopping replication.')
                     break
             else:
                 if funds.money < SIMOCOIN_ENTRY_COST:
+                    _log_debug('Not enough funds. Stopping replication.')
                     break
                 funds.remove(SIMOCOIN_ENTRY_COST, TELEMETRY_MONEY_REASON)
 
-            # Encender proceso y temporizador nativo de Maxis en la máquina esclava
-            slave_pc.set_state(mining_state_value.state, mining_state_value)
+            if mining_state_value is not None:
+                slave_pc.set_state(mining_state_value.state, mining_state_value)
+                _log_debug('set_state applied to slave PC: ' + str(slave_pc))
 
+            if farming_stat is not None:
+                slave_stat_comp = getattr(slave_pc, 'statistic_component', None)
+                if slave_stat_comp is not None:
+                    tracker = slave_stat_comp.get_commodity_tracker()
+                    if tracker is not None:
+                        stat_inst = tracker.add_statistic(farming_stat)
+                        if stat_inst is not None:
+                            stat_inst.set_value(stat_inst.max_value)
+                            _log_debug('Set commodity tracker stat value on slave PC')
+
+            slave_farming_comp = get_simocoin_farming_component(slave_pc)
+            if slave_farming_comp is not None and hasattr(slave_farming_comp, '_refresh'):
+                slave_farming_comp._refresh()
+                _log_debug('_refresh called on slave farming component')
+
+    except Exception as e:
+        _log_debug('Exception in replicate_mining_network: ' + str(e))
     finally:
         _IS_REPLICATING = False
 
 @inject(Interaction, 'on_run')
 def _hook_on_interaction_run(original, self, *args, **kwargs):
-    """
-    Intercepta el inicio de cualquier interacción.
-    Fast-Path: el 99.9% de interacciones en el juego se descartan en <5 nanosegundos
-    sin comprobaciones de cadenas de texto ni accesos de memoria pesados.
-    """
     result = original(self, *args, **kwargs)
     if result is False:
         return result
 
-    # Filtro 1: Descartar interacciones que no sean SuperInteractions
     if not getattr(self, 'is_super', False):
         return result
 
-    # Filtro 2: Descartar interacciones cuyo target no sea una computadora (caminar, comer, etc.)
     target = getattr(self, 'target', None)
     if target is None or not getattr(target, 'is_computer', False):
         return result
 
-    # Solo si el usuario ejecutó una SuperInteracción sobre un ordenador, validamos Simocoin
     try:
-        if is_simocoin_mining_affordance(self.affordance):
+        aff_name = getattr(self.affordance, '__name__', '')
+        _log_debug('Computer SuperInteraction on_run: affordance=' + str(aff_name) + ', target=' + str(target))
+        if is_simocoin_mining_context(target, self.affordance):
+            _log_debug('Matched Simocoin context! Triggering replication...')
             replicate_mining_network(self)
-    except Exception:
-        pass
+    except Exception as e:
+        _log_debug('Error in hook: ' + str(e))
 
     return result
